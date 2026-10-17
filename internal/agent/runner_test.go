@@ -362,3 +362,29 @@ func TestDumpPasswordNeverInArgsOrEnv(t *testing.T) {
 		t.Errorf("env mode: stdin=%v args=%q", cmd.Stdin, cmd.Args)
 	}
 }
+
+func TestDiscoveryClassification(t *testing.T) {
+	for img, want := range map[string]string{"mysql:8.4": "mysql", "library/mariadb:11": "mariadb", "percona/percona-server:8": "mysql",
+		"bitnami/mysql:8.0": "mysql", "redis:7": "", "postgres:16": "", "myapp-mysqlish:1": ""} {
+		if got := engineOf(img); got != want {
+			t.Errorf("engineOf(%q) = %q, want %q", img, got, want)
+		}
+	}
+	if !isCacheImage("redis:7-alpine") || !isCacheImage("valkey/valkey") || isCacheImage("mysql:8") {
+		t.Error("cache image detection")
+	}
+	cache := []proto.DiscoveredVolume{{Name: "debian_app_cache"}, {Name: "x", MountedAt: []string{"/var/www/html/bootstrap/cache"}}}
+	for _, v := range cache {
+		if !looksLikeCache(&v) {
+			t.Errorf("%+v should look like a cache", v)
+		}
+	}
+	if looksLikeCache(&proto.DiscoveredVolume{Name: "debian_app_storage", MountedAt: []string{"/var/www/html/storage"}}) {
+		t.Error("storage is data, not cache")
+	}
+	for src, skip := range map[string]bool{"/var/run/docker.sock": true, "/etc/localtime": true, "/proc/1": true, "/root/dockerfiles/debian/nginx.conf": false, "/srv/app": false} {
+		if skipBind(src) != skip {
+			t.Errorf("skipBind(%q) = %v", src, !skip)
+		}
+	}
+}

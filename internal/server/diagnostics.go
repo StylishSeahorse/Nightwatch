@@ -128,6 +128,20 @@ func agentCallStatus(err error) int {
 	return http.StatusGatewayTimeout
 }
 
+// ---- Auto-detect --------------------------------------------------------------------
+
+// discover asks the agent what is on its machine (databases, Docker volumes,
+// Compose project files) and passes its answer through.
+func (s *Server) discover(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.hub.Call(r.Context(), r.PathValue("id"), proto.MsgDiscover, nil, 100*time.Second)
+	if err != nil {
+		writeErr(w, agentCallStatus(err), err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
 // ---- Agent connection test ----------------------------------------------------------
 
 func (s *Server) agentStatus(w http.ResponseWriter, r *http.Request) {

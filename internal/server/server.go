@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/rotate-key", admin(s.rotateAgentKey))
 	mux.HandleFunc("GET /api/agents/{id}/browse", admin(s.browseAgent))
 	mux.HandleFunc("GET /api/agents/{id}/status", admin(s.agentStatus))
+	mux.HandleFunc("GET /api/agents/{id}/discover", admin(s.discover))
 
 	mux.HandleFunc("GET /api/credentials", admin(s.listCredentials))
 	mux.HandleFunc("POST /api/credentials", admin(s.createCredential))

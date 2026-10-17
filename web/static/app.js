@@ -260,6 +260,12 @@ async function viewAgent(agentId) {
     const addManual = () => {
       const v = manual.value.trim().replace(/\/+$/, '');
       if (!v.startsWith('/')) { toast('Enter an absolute path starting with /', true); return; }
+      const roots = agent.browse_roots || [];
+      if (roots.length && !roots.some((r) => v === r || v.startsWith(r.replace(/\/$/, '') + '/'))) {
+        const top = '/' + v.split('/')[1];
+        toast(`${v} is outside the folders this agent may read (${roots.join(', ')}). Re-run its install command with --roots ${roots.join(',')},${top} first.`, true);
+        return;
+      }
       for (const s of [...sel.keys()]) if (s.startsWith(v + '/')) sel.delete(s);
       sel.set(v, 'copy'); refreshChecks();
     };
@@ -340,6 +346,15 @@ async function viewAgent(agentId) {
     exEd = excludesEditor(excludes);
     exEd.refresh([...sel.keys()]);
     const dumpsBox = dumpsEditor(dumps, { agentId, jobId: job ? job.id : '' });
+    const discovery = discoveryPanel(agentId, {
+      hasPath: (p) => sel.has(p) || [...sel.keys()].some((x) => p.startsWith(x + '/')),
+      addPath: (p) => { for (const x of [...sel.keys()]) if (x.startsWith(p + '/')) sel.delete(x); sel.set(p, 'copy'); refreshChecks(); },
+      hasExclude: (e) => excludes.includes(e),
+      addExclude: (e) => { excludes.push(e); exEd.refresh([...sel.keys()]); },
+      hasDump: (c) => dumps.some((d) => d.container === c),
+      addDump: (d) => { dumps.push(d); dumpsBox.rerender(); },
+      suggestName: (n) => { if (!name.value) name.value = n; },
+    });
 
     // Backup type
     let backupType = job ? job.backup_type : 'incremental';
@@ -379,6 +394,7 @@ async function viewAgent(agentId) {
     clear(jobFormBox).append(h('form', { class: 'space-y-3', onsubmit: save },
       h('h3', { class: 'font-semibold' }, job ? 'Edit job: ' + job.name : 'New backup job'),
       creds.length ? null : h('p', { class: 'text-sm text-amber-400' }, 'Add Wasabi credentials first (Credentials tab).'),
+      agent.online ? discovery : null,
       h('div', {}, h('label', { class: 'label' }, 'Name'), name),
       h('div', { class: 'grid grid-cols-2 gap-3' },
         h('div', {}, h('label', { class: 'label' }, 'Wasabi credentials'), credSel),

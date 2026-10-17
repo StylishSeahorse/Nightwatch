@@ -164,5 +164,93 @@ function dumpsEditor(dumps, { agentId, jobId }) {
       'Each run takes a consistent dump with mysqldump --single-transaction (no table locks for InnoDB), gzips it and streams it straight to Wasabi under _databases/<name>/. Nothing is written to local disk. Back up the dump, not the raw database volume.'));
   }
   render();
+  box.rerender = render;
   return box;
+}
+
+// ---- Auto-detect ---------------------------------------------------------------------------
+
+// discoveryPanel asks the agent what is on the machine and offers one-click
+// additions. `act` holds callbacks into the job form: has*/add* for paths,
+// excludes and dumps.
+function discoveryPanel(agentId, act) {
+  const box = h('div', { class: 'space-y-3 rounded-md border border-sky-900 bg-sky-950/20 p-3' });
+  let found = null;
+  const badge = (text, tone) => h('span', { class: 'rounded px-1.5 py-0.5 text-xs ' + (tone === 'skip' ? 'bg-slate-800 text-slate-400' : 'bg-emerald-950 text-emerald-300') }, text);
+  const btn = (label, done, fn) => done
+    ? h('span', { class: 'text-xs text-emerald-400' }, '✓ added')
+    : h('button', { type: 'button', class: 'btn btn-ghost px-2 py-1 text-xs', onclick: () => { fn(); render(); } }, label);
+  const dumpFor = (d) => ({
+    name: d.suggested_name, container: d.container, host: '', port: 0, user: 'root', password: '',
+    use_container_env: d.has_root_env, databases: d.databases && d.databases.length ? [...d.databases] : [], keep_days: 30,
+  });
+
+  function recommended() {
+    let n = 0;
+    for (const d of found.databases) if (!act.hasDump(d.container)) { act.addDump(dumpFor(d)); n++; }
+    for (const v of found.volumes) {
+      if (!v.path) continue;
+      if (v.kind === 'data' && !act.hasPath(v.path)) { act.addPath(v.path); n++; }
+      if (v.kind !== 'data' && !act.hasExclude(v.path)) { act.addExclude(v.path); n++; }
+    }
+    for (const p of found.projects) if (p.dir && !act.hasPath(p.dir)) { act.addPath(p.dir); n++; }
+    if (found.projects.length) act.suggestName(found.projects.map((p) => p.name).join(' + ') + ' server');
+    toast(n ? `Added ${n} item(s); review them below, then save the job` : 'Everything recommended is already in this job');
+    render();
+  }
+
+  function render() {
+    clear(box);
+    if (!found) return;
+    if (!found.docker) {
+      box.append(h('p', { class: 'text-sm text-amber-300' }, '! Could not read Docker on this machine: ' + (found.error || 'unknown error')),
+        h('p', { class: 'text-xs text-slate-400' }, 'You can still pick folders in the file tree.'));
+      return;
+    }
+    const total = found.databases.length + found.volumes.length + found.projects.length;
+    box.append(h('div', { class: 'flex flex-wrap items-center gap-2' },
+      h('span', { class: 'font-medium' }, total ? 'Found on this machine' : 'No Docker databases, volumes or projects found'), h('div', { class: 'flex-1' }),
+      total ? h('button', { type: 'button', class: 'btn btn-primary', onclick: recommended }, 'Add all recommended') : null));
+    if (found.databases.length) {
+      box.append(h('div', { class: 'label mt-1' }, 'Databases (dumped with mysqldump)'));
+      for (const d of found.databases) {
+        box.append(h('div', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+          h('span', { class: 'font-medium' }, d.container),
+          h('span', { class: 'text-xs text-slate-400' }, `${d.engine}${d.version ? ' ' + d.version : ''}` + (d.databases && d.databases.length ? ` · databases: ${d.databases.join(', ')}` : '')),
+          d.has_root_env ? null : h('span', { class: 'text-xs text-amber-300' }, 'no root password in the container: enter one after adding'),
+          d.list_error ? h('span', { class: 'text-xs text-amber-300' }, d.list_error) : null,
+          h('div', { class: 'flex-1' }), btn('Dump it', act.hasDump(d.container), () => act.addDump(dumpFor(d)))));
+      }
+    }
+    if (found.volumes.length) {
+      box.append(h('div', { class: 'label mt-1' }, 'Docker volumes & mounts'));
+      for (const v of found.volumes) {
+        const verdict = v.kind === 'data' ? badge('back up', 'add') : badge(v.kind === 'database' ? 'skip: database is dumped' : 'skip: cache', 'skip');
+        const action = !v.path ? h('span', { class: 'text-xs text-amber-300' }, 'outside the agent’s folders (re-run its install with --roots …,/var)') :
+          v.kind === 'data' ? btn('Add', act.hasPath(v.path), () => act.addPath(v.path)) : btn('Exclude', act.hasExclude(v.path), () => act.addExclude(v.path));
+        box.append(h('div', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+          h('span', { class: 'font-mono text-xs', title: v.path || v.host_path }, v.name), verdict,
+          h('span', { class: 'text-xs text-slate-500' }, (v.mounted_at.length ? `at ${v.mounted_at.join(', ')}` : 'not used by a running container') + (v.containers.length ? ` in ${v.containers.join(', ')}` : '')),
+          h('div', { class: 'flex-1' }), action));
+      }
+    }
+    if (found.projects.length) {
+      box.append(h('div', { class: 'label mt-1' }, 'Compose projects (config, .env, compose files)'));
+      for (const p of found.projects) {
+        box.append(h('div', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+          h('span', { class: 'font-medium' }, p.name),
+          h('span', { class: 'font-mono text-xs text-slate-400', title: p.dir }, p.dir || 'folder not visible to the agent'),
+          p.files.length ? h('span', { class: 'text-xs text-slate-500' }, 'includes ' + p.files.map((f) => f.split('/').pop()).join(', ')) : null,
+          h('div', { class: 'flex-1' }), p.dir ? btn('Add folder', act.hasPath(p.dir), () => act.addPath(p.dir)) : null));
+      }
+    }
+  }
+
+  const go = h('button', { type: 'button', class: 'btn btn-ghost' }, '🔍 Auto-detect databases, volumes & config');
+  go.addEventListener('click', async () => {
+    go.disabled = true; go.textContent = 'Scanning Docker on this machine…';
+    try { found = await api('GET', `/api/agents/${agentId}/discover`); render(); } catch (e) { toast(e.message, true); }
+    go.disabled = false; go.textContent = '🔍 Auto-detect again';
+  });
+  return h('div', { class: 'space-y-2' }, go, box);
 }

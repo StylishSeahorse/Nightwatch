@@ -24,6 +24,8 @@ func (a *Agent) diagnose(ctx context.Context, env proto.Envelope) (any, error) {
 	switch env.Type {
 	case proto.MsgStatus:
 		return a.status(), nil
+	case proto.MsgDiscover:
+		return a.discover(ctx), nil
 	case proto.MsgTestDump:
 		var d proto.DumpConfig
 		if err := json.Unmarshal(env.Payload, &d); err != nil {

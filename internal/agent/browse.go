@@ -69,7 +69,7 @@ func (s *Scanner) Resolve(p string) (string, error) {
 			return clean, nil
 		}
 	}
-	return "", errors.New("path is outside the allowed backup roots")
+	return "", fmt.Errorf("path is outside the folders this agent may read (%s); add it by re-running the install command with --roots %s,%s", strings.Join(s.roots, ", "), strings.Join(s.roots, ","), suggestRoot(clean))
 }
 
 // within reports whether child equals or is nested under parent (component-wise,
@@ -165,4 +165,11 @@ func entryFrom(full, name string, fi os.FileInfo, symlink bool) proto.Entry {
 		e.Size = fi.Size()
 	}
 	return e
+}
+
+// suggestRoot proposes the top-level folder to allow for p, e.g. /var for
+// /var/lib/docker/volumes.
+func suggestRoot(p string) string {
+	parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)
+	return "/" + parts[0]
 }

@@ -24,6 +24,7 @@ const (
 	MsgTestCreds     = "test_credentials" // server -> agent, request: CredentialTestRequest, reply: CredentialTestResult
 	MsgStatus        = "status"           // server -> agent, request: none, reply: AgentStatus
 	MsgTestDump      = "test_dump"        // server -> agent, request: DumpConfig, reply: DumpTestResult
+	MsgDiscover      = "discover"         // server -> agent, request: none, reply: Discovery
 	MsgHello         = "hello"            // agent -> server, first message: Hello
 	MsgPing          = "ping"             // agent -> server, keepalive
 	MsgResult        = "result"           // reply to any request
@@ -284,4 +285,46 @@ func ValidateSchedule(expr, tz string) error {
 		return fmt.Errorf("invalid schedule: %w", err)
 	}
 	return nil
+}
+
+// ---- Auto-detection (MsgDiscover) ------------------------------------------------
+
+// Discovery is what the agent found on its machine that is worth backing up.
+// It never carries secret values: only whether a root password is available.
+type Discovery struct {
+	Docker    bool                `json:"docker"`          // Docker reachable
+	Error     string              `json:"error,omitempty"` // why not
+	Databases []DiscoveredDB      `json:"databases"`
+	Volumes   []DiscoveredVolume  `json:"volumes"`
+	Projects  []DiscoveredProject `json:"projects"`
+}
+
+type DiscoveredDB struct {
+	Container     string   `json:"container"`
+	Image         string   `json:"image"`
+	Engine        string   `json:"engine"` // mysql | mariadb
+	Project       string   `json:"project,omitempty"`
+	Service       string   `json:"service,omitempty"`
+	SuggestedName string   `json:"suggested_name"`
+	HasRootEnv    bool     `json:"has_root_env"` // MYSQL_ROOT_PASSWORD / MARIADB_ROOT_PASSWORD is set
+	Version       string   `json:"version,omitempty"`
+	Databases     []string `json:"databases,omitempty"` // user databases (system ones left out)
+	ListError     string   `json:"list_error,omitempty"`
+}
+
+type DiscoveredVolume struct {
+	Name       string   `json:"name"`           // docker volume name, or the host path for bind mounts
+	Bind       bool     `json:"bind,omitempty"` // a bind mount rather than a named volume
+	Path       string   `json:"path"`           // path as the agent sees it ("" if not visible)
+	HostPath   string   `json:"host_path"`
+	Kind       string   `json:"kind"` // data | database | cache
+	Project    string   `json:"project,omitempty"`
+	Containers []string `json:"containers"`
+	MountedAt  []string `json:"mounted_at"` // paths inside the containers, e.g. /var/www/html/storage
+}
+
+type DiscoveredProject struct {
+	Name  string   `json:"name"`
+	Dir   string   `json:"dir"`   // as the agent sees it ("" if not visible)
+	Files []string `json:"files"` // .env and compose files that exist, as the agent sees them
 }
