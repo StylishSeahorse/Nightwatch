@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/stylishseahorse/rclone-backup-manager/internal/proto"
@@ -169,6 +171,70 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// Limits that keep a broken dump from wedging the agent.
+var (
+	dumpStallTimeout = 30 * time.Minute // no output from mysqldump for this long = stuck
+	dumpMaxDuration  = 12 * time.Hour
+)
+
+// lineLogger is an io.Writer that forwards complete lines to the run log.
+type lineLogger struct {
+	lg     *runLogger
+	stream string
+	mu     sync.Mutex
+	buf    []byte
+}
+
+func (w *lineLogger) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexAny(w.buf, "\r\n")
+		if i < 0 {
+			break
+		}
+		if t := strings.TrimSpace(string(w.buf[:i])); t != "" {
+			w.lg.add(w.stream, t)
+		}
+		w.buf = w.buf[i+1:]
+	}
+	if len(w.buf) > 64<<10 { // a pathological unterminated line
+		w.lg.add(w.stream, strings.TrimSpace(string(w.buf[:4096]))+" …")
+		w.buf = w.buf[:0]
+	}
+	return len(p), nil
+}
+
+func (w *lineLogger) flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if t := strings.TrimSpace(string(w.buf)); t != "" {
+		w.lg.add(w.stream, t)
+	}
+	w.buf = nil
+}
+
+// progressReader records when data last arrived, for the stall watchdog.
+type progressReader struct {
+	r    io.Reader
+	last atomic.Int64 // unix nanos
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// dumpOne streams mysqldump -> gzip -> rclone rcat.
+//
+// Every way this pipeline can break must end it promptly: if the upload dies
+// first, its read end of the pipe is closed so the copy fails instead of
+// blocking forever, and the dump is killed; a stall watchdog and an overall
+// limit stop a hung database; cancelling the run kills both processes.
 func (a *Agent) dumpOne(ctx context.Context, job *proto.JobConfig, d proto.DumpConfig, stamp string, lg *runLogger) error {
 	dir := dumpDir(job, a.name(), d)
 	final := dir + "/" + unsafeSeg.ReplaceAllString(d.Name, "_") + "-" + stamp + ".sql.gz"
@@ -176,77 +242,115 @@ func (a *Agent) dumpOne(ctx context.Context, job *proto.JobConfig, d proto.DumpC
 	env := rcloneEnv(job.Wasabi)
 	lg.agent("database %s: dumping %s from %s -> %s", d.Name, dumpWhat(d), dumpWhere(d), strings.TrimPrefix(final, ":s3:"))
 
-	dctx, cancel := context.WithCancel(ctx)
+	stallLimit, maxDur := dumpStallTimeout, dumpMaxDuration
+	dctx, cancel := context.WithTimeout(ctx, maxDur)
 	defer cancel()
+	var stopReason atomic.Value // why we killed the pipeline, if we did
+
 	dump, err := a.mysqlCommand(dctx, d, "dump", append(append([]string{}, mysqlDumpFlags...), dumpDBArgs(d)...))
 	if err != nil {
 		return err
 	}
+	killGroup(dump)
 	dumpOut, err := dump.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	dumpErr, _ := dump.StderrPipe()
+	dumpLog := &lineLogger{lg: lg, stream: "stderr"}
+	dump.Stderr = dumpLog
 
 	pr, pw := io.Pipe()
 	rcat := exec.CommandContext(dctx, a.cfg.RclonePath, "rcat", partial, "--log-level", "ERROR", "--retries", "1", "--low-level-retries", "10",
 		// Streamed uploads have unknown size: rclone caps them at 10,000 chunks, so
 		// 32 MiB chunks allow dumps up to ~300 GB compressed (~128 MB RAM in flight).
 		"--s3-chunk-size", "32M")
-	rcat.Env, rcat.Stdin, rcat.WaitDelay = env, pr, 15*time.Second
-	rcatErr, _ := rcat.StderrPipe()
+	rcatLog := &lineLogger{lg: lg, stream: "stderr"}
+	rcat.Env, rcat.Stdin, rcat.Stderr, rcat.WaitDelay = env, pr, rcatLog, 15*time.Second
+	killGroup(rcat)
 
 	if err := rcat.Start(); err != nil {
 		return fmt.Errorf("start rclone: %w", err)
 	}
+	// If the upload ends (finished, failed or killed), nothing reads the pipe
+	// any more: close it so the writer gets an error instead of blocking.
+	rcatDone := make(chan error, 1)
+	go func() {
+		err := rcat.Wait()
+		pr.CloseWithError(errors.New("upload stopped"))
+		rcatDone <- err
+	}()
 	if err := dump.Start(); err != nil {
 		pw.CloseWithError(err)
-		_ = rcat.Wait()
+		<-rcatDone
 		return fmt.Errorf("start dump (is Docker available to the agent?): %w", err)
 	}
 
-	var wg sync.WaitGroup
-	pump := func(r io.Reader, stream string) {
-		defer wg.Done()
-		sc := newLineScanner(r)
-		for sc.Scan() {
-			if t := strings.TrimSpace(sc.Text()); t != "" {
-				lg.add(stream, t)
+	src := &progressReader{r: dumpOut}
+	src.last.Store(time.Now().UnixNano())
+	watchDone := make(chan struct{})
+	go func() { // stall watchdog
+		every := stallLimit / 4
+		if every > time.Minute {
+			every = time.Minute
+		}
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-watchDone:
+				return
+			case <-t.C:
+				if time.Since(time.Unix(0, src.last.Load())) > stallLimit {
+					stopReason.Store(fmt.Sprintf("mysqldump produced no output for %s", stallLimit))
+					cancel()
+					return
+				}
 			}
 		}
-		_, _ = io.Copy(io.Discard, r)
-	}
-	wg.Add(2)
-	go pump(dumpErr, "stderr")
-	go pump(rcatErr, "stderr")
+	}()
 
 	// mysqldump -> gzip -> rclone rcat, counting raw SQL and compressed bytes.
 	sqlTail := &countingWriter{w: io.Discard}
 	upload := &countingWriter{w: pw}
 	gz := gzip.NewWriter(upload)
-	_, copyErr := io.Copy(io.MultiWriter(gz, sqlTail), dumpOut)
+	_, copyErr := io.Copy(io.MultiWriter(gz, sqlTail), src)
 	if copyErr == nil {
 		copyErr = gz.Close()
 	}
+	if copyErr != nil {
+		cancel() // the upload is gone: stop mysqldump rather than let it block
+	}
 	dumpWait := dump.Wait()
+	close(watchDone)
+	dumpLog.flush()
 	complete := dumpWait == nil && copyErr == nil && bytes.Contains(sqlTail.tail, []byte(dumpCompleteMarker))
 	if complete {
 		pw.Close()
 	} else {
 		pw.CloseWithError(errors.New("dump failed")) // makes rcat abort the upload
 	}
-	rcatWait := rcat.Wait()
-	wg.Wait()
+	rcatWait := <-rcatDone
+	rcatLog.flush()
 
 	cleanup := func() {
 		c, cc := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cc()
 		_, _ = a.rcloneOnce(c, env, nil, nil, "deletefile", partial, "--retries", "1")
 	}
+	reason, _ := stopReason.Load().(string)
 	switch {
 	case ctx.Err() != nil:
 		cleanup()
 		return ctx.Err()
+	case reason != "":
+		cleanup()
+		return errors.New("stopped: " + reason)
+	case dctx.Err() == context.DeadlineExceeded:
+		cleanup()
+		return fmt.Errorf("stopped: the dump took longer than %s", maxDur)
+	case rcatWait != nil && !complete:
+		cleanup()
+		return errors.New("upload to Wasabi failed; rclone's error is in the lines above")
 	case dumpWait != nil:
 		cleanup()
 		return fmt.Errorf("mysqldump failed: %v", exitText(dumpWait))
@@ -408,4 +512,11 @@ func dbHint(msg string) string {
 		return "The container has no MYSQL_ROOT_PASSWORD; enter the password instead"
 	}
 	return ""
+}
+
+// killGroup makes cancelling cmd kill its whole process group, so a wrapper
+// script's children cannot keep the pipes open and delay the end of the run.
+func killGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 }

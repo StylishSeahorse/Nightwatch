@@ -113,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs", admin(s.listRuns))
 	mux.HandleFunc("GET /api/runs/{id}", admin(s.getRun))
 	mux.HandleFunc("GET /api/runs/{id}/logs", admin(s.runLogs))
+	mux.HandleFunc("GET /api/runs/{id}/log.txt", admin(s.runLogText))
 	mux.HandleFunc("POST /api/runs/{id}/cancel", admin(s.cancelRun))
 
 	// Agent API (API-key authenticated)

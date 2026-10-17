@@ -568,21 +568,41 @@ async function viewRun(id) {
     r.status === 'running' ? h('button', { class: 'btn btn-danger', onclick: guard(async () => { await api('POST', `/api/runs/${id}/cancel`); toast('Cancel requested'); }) }, 'Cancel run') : null,
   ].filter(Boolean));
 
+  // The viewer shows at most MAX_LINES lines: it opens on the newest ones and
+  // follows new output. The full log is a download, so a huge log can never
+  // exhaust the browser's memory.
+  const MAX_LINES = 5000;
   const lineClass = { stderr: 'text-amber-300', agent: 'text-emerald-300' };
+  const note = h('div', { class: 'mb-2 flex flex-wrap items-center gap-3 text-xs text-slate-500' });
+  let first = true, busy = false, shown = 0;
   async function tick() {
-    const [r, logs] = await Promise.all([api('GET', '/api/runs/' + id), api('GET', `/api/runs/${id}/logs?after=${after}`)]);
-    renderHead(r);
-    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
-    for (const l of logs.lines) {
-      after = l.seq;
-      const t = new Date(l.ts).toLocaleTimeString();
-      logEl.append(h('span', { class: lineClass[l.stream] || '' }, `${t}  ${l.line}\n`));
-    }
-    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
-    if (r.status !== 'running' && !logs.lines.length) stopPolling();
+    if (busy) return; // never stack requests: a slow one must not duplicate lines
+    busy = true;
+    try {
+      const q = first ? 'tail=1000' : `after=${after}`;
+      const [r, logs] = await Promise.all([api('GET', '/api/runs/' + id), api('GET', `/api/runs/${id}/logs?${q}`)]);
+      first = false;
+      renderHead(r);
+      const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
+      const frag = document.createDocumentFragment();
+      for (const l of logs.lines) {
+        after = l.seq;
+        const t = new Date(l.ts).toLocaleTimeString();
+        frag.append(h('span', { class: lineClass[l.stream] || '' }, `${t}  ${l.line}\n`));
+      }
+      logEl.append(frag);
+      shown += logs.lines.length;
+      while (shown > MAX_LINES && logEl.firstChild) { logEl.removeChild(logEl.firstChild); shown--; }
+      clear(note).append(
+        h('span', {}, logs.total > shown ? `Showing the latest ${shown.toLocaleString()} of ${logs.total.toLocaleString()} lines.` : `${logs.total.toLocaleString()} lines.`),
+        h('a', { href: `/api/runs/${id}/log.txt`, class: 'text-sky-400 hover:underline' }, 'Download full log'));
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+      // Finished and caught up: stop polling.
+      if (r.status !== 'running' && logs.lines.length < 1000) stopPolling();
+    } finally { busy = false; }
   }
   renderHead(run);
-  layout('runs', head, logEl);
+  layout('runs', head, note, logEl);
   await tick();
   poller = setInterval(() => tick().catch(() => {}), 1500);
 }

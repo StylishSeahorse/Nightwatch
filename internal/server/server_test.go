@@ -671,3 +671,54 @@ func TestExpectedIntervalUsesLongestGap(t *testing.T) {
 		t.Error("no schedule => 0")
 	}
 }
+
+func TestRunLogsTailAndReconcile(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	aid, _ := h.srv.createAgent("a", "wbk_"+strings.Repeat("a", 40))
+	db := h.srv.db
+	_, _ = db.Exec(`INSERT INTO wasabi_credentials (id,name,access_key,secret_key_enc,region,bucket,created_at) VALUES ('c','c','k','e','us-east-1','bkt',1)`)
+	_, _ = db.Exec(`INSERT INTO backup_jobs (id,agent_id,credential_id,name,created_at,updated_at) VALUES ('j',?,'c','j',1,1)`, aid)
+	old := now() - 3600
+	for _, id := range []string{"big", "alive", "lost", "fresh"} {
+		st := old
+		if id == "fresh" {
+			st = now()
+		}
+		_, _ = db.Exec(`INSERT INTO runs (id,job_id,agent_id,trigger,status,started_at,updated_at) VALUES (?,'j',?,'manual','running',?,?)`, id, aid, st, st)
+	}
+	tx, _ := db.Begin()
+	for i := 1; i <= 5000; i++ {
+		_, _ = tx.Exec(`INSERT INTO run_logs (run_id,seq,ts,stream,line) VALUES ('big',?,1,'stdout',?)`, i, fmt.Sprintf("line %d", i))
+	}
+	_ = tx.Commit()
+
+	var res struct {
+		Total int
+		Lines []proto.LogLine
+	}
+	_, b := h.do("GET", "/api/runs/big/logs?tail=100", nil, "")
+	_ = json.Unmarshal(b, &res)
+	if res.Total != 5000 || len(res.Lines) != 100 || res.Lines[0].Seq != 4901 || res.Lines[99].Seq != 5000 {
+		t.Errorf("tail: total=%d n=%d first=%v", res.Total, len(res.Lines), res.Lines[0].Seq)
+	}
+	_, b = h.do("GET", "/api/runs/big/logs?after=0", nil, "")
+	_ = json.Unmarshal(b, &res)
+	if len(res.Lines) != 1000 {
+		t.Errorf("a page is capped at 1000 lines, got %d", len(res.Lines))
+	}
+	code, b := h.do("GET", "/api/runs/big/log.txt", nil, "")
+	if code != 200 || strings.Count(string(b), "\n") != 5000 || !strings.Contains(string(b), "[stdout] line 5000") {
+		t.Errorf("full log download: %d, %d lines", code, strings.Count(string(b), "\n"))
+	}
+
+	// The agent reconnects running only "alive": "lost" and "big" were interrupted.
+	h.srv.reconcileRuns(aid, []string{"alive"})
+	for id, want := range map[string]string{"alive": "running", "lost": "failed", "big": "failed", "fresh": "running"} {
+		var st string
+		_ = db.QueryRow(`SELECT status FROM runs WHERE id = ?`, id).Scan(&st)
+		if st != want {
+			t.Errorf("run %s = %s, want %s", id, st, want)
+		}
+	}
+}

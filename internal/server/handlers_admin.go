@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -353,6 +354,8 @@ type jobInput struct {
 	Dumps         []dumpInput        `json:"dumps"`
 	Schedules     []scheduleView     `json:"schedules"`
 }
+
+var unsafeFileChars = regexp.MustCompile(`[^A-Za-z0-9-]`)
 
 var prefixRe = regexp.MustCompile(`^[A-Za-z0-9._\- /]{0,200}$`)
 
@@ -804,7 +807,26 @@ func (s *Server) runLogs(w http.ResponseWriter, r *http.Request) {
 		dbErr(w, err)
 		return
 	}
-	rows, err := s.db.Query(`SELECT seq, ts, stream, line FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT 2000`, id, after)
+	limit := 1000
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n < limit {
+		limit = n
+	}
+	var total int
+	var maxSeq sql.NullInt64
+	_ = s.db.QueryRow(`SELECT COUNT(*), MAX(seq) FROM run_logs WHERE run_id = ?`, id).Scan(&total, &maxSeq)
+	// ?tail=N: start with the newest N lines instead of the oldest, so a huge
+	// log opens instantly. The viewer then follows with ?after=<last seq>.
+	if t, err := strconv.Atoi(r.URL.Query().Get("tail")); err == nil && t > 0 && maxSeq.Valid {
+		if t > limit {
+			t = limit
+		}
+		var cut sql.NullInt64
+		_ = s.db.QueryRow(`SELECT seq FROM run_logs WHERE run_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?`, id, t).Scan(&cut)
+		if cut.Valid && cut.Int64 > after {
+			after = cut.Int64
+		}
+	}
+	rows, err := s.db.Query(`SELECT seq, ts, stream, line FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`, id, after, limit)
 	if err != nil {
 		dbErr(w, err)
 		return
@@ -819,7 +841,40 @@ func (s *Server) runLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		lines = append(lines, l)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": status, "lines": lines})
+	writeJSON(w, http.StatusOK, map[string]any{"status": status, "lines": lines, "total": total})
+}
+
+// runLogText streams a run's whole log as a text file, row by row, so even a
+// huge log never has to fit in memory on either side.
+func (s *Server) runLogText(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var job string
+	if err := s.db.QueryRow(`SELECT j.name FROM runs r JOIN backup_jobs j ON j.id = r.job_id WHERE r.id = ?`, id).Scan(&job); err != nil {
+		dbErr(w, err)
+		return
+	}
+	rows, err := s.db.Query(`SELECT ts, stream, line FROM run_logs WHERE run_id = ? ORDER BY seq`, id)
+	if err != nil {
+		dbErr(w, err)
+		return
+	}
+	defer rows.Close()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="run-%s.log"`, unsafeFileChars.ReplaceAllString(short, "_")))
+	bw := bufio.NewWriterSize(w, 64<<10)
+	defer bw.Flush()
+	for rows.Next() {
+		var ts int64
+		var stream, line string
+		if rows.Scan(&ts, &stream, &line) != nil {
+			return
+		}
+		fmt.Fprintf(bw, "%s [%s] %s\n", time.UnixMilli(ts).UTC().Format("2006-01-02 15:04:05"), stream, line)
+	}
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {

@@ -91,6 +91,7 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			roots, _ := json.Marshal(h.BrowseRoots)
 			_, _ = s.db.Exec(`UPDATE agents SET hostname=?, version=?, os=?, rclone_ver=?, browse_roots=?, last_seen_at=? WHERE id=?`,
 				clip(h.Hostname, 255), clip(h.Version, 64), clip(h.OS+"/"+h.Arch, 64), clip(h.RcloneVer, 64), string(roots), now(), a.ID)
+			s.reconcileRuns(a.ID, h.RunningRuns)
 			if h.ConfigRev != s.rev(a.ID) {
 				s.hub.Notify(a.ID) // agent's copy is stale (or empty): tell it to fetch
 			}
@@ -321,4 +322,35 @@ func (s *Server) agentFinishRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// reconcileRuns fails runs the dashboard shows as running on this agent that
+// the agent says it is not executing - it restarted or crashed mid-run - so a
+// stuck run never lingers. Runs younger than two minutes are left alone, in
+// case one started while this hello was in flight.
+func (s *Server) reconcileRuns(agentID string, running []string) {
+	keep := map[string]bool{}
+	for _, id := range running {
+		keep[id] = true
+	}
+	rows, err := s.db.Query(`SELECT id FROM runs WHERE agent_id = ? AND status = 'running' AND started_at < ?`, agentID, now()-120)
+	if err != nil {
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil && !keep[id] {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	for _, id := range stale {
+		_, _ = s.db.Exec(`UPDATE runs SET status = 'failed', finished_at = ?, updated_at = ?,
+			summary = CASE WHEN summary = '' THEN 'agent restarted while this run was in progress' ELSE summary END
+			WHERE id = ? AND status = 'running'`, now(), now(), id)
+	}
+	if len(stale) > 0 {
+		s.log.Printf("agent %s: marked %d interrupted run(s) as failed", agentID, len(stale))
+	}
 }

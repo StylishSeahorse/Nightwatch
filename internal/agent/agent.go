@@ -225,7 +225,7 @@ func (a *Agent) session(ctx context.Context) error {
 
 	hello, _ := json.Marshal(proto.Hello{
 		Hostname: a.cfg.Hostname, Version: Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		RcloneVer: a.rclone, BrowseRoots: a.scanner.Roots(), ConfigRev: a.revision(),
+		RcloneVer: a.rclone, BrowseRoots: a.scanner.Roots(), ConfigRev: a.revision(), RunningRuns: a.runningRunIDs(),
 	})
 	if err := send(proto.Envelope{Type: proto.MsgHello, Payload: hello}); err != nil {
 		return fmt.Errorf("hello: %w", err)
@@ -303,6 +303,20 @@ func (a *Agent) session(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// runningRunIDs lists runs in progress, so the dashboard can fail any run it
+// still shows as running that this agent no longer has (e.g. after a restart).
+func (a *Agent) runningRunIDs() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ids := []string{}
+	for _, ar := range a.running {
+		if ar.runID != "" {
+			ids = append(ids, ar.runID)
+		}
+	}
+	return ids
 }
 
 func (a *Agent) cancelRun(runID string) {

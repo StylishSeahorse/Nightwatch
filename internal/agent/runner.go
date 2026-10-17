@@ -325,7 +325,7 @@ func (a *Agent) execute(ctx context.Context, ar *activeRun, job *proto.JobConfig
 		lg.agent("%s", msg)
 		return proto.StatusCancelled, 130, msg
 	}
-	if mode == proto.ModeBackup && incremental && job.Retention > 0 && failed == 0 {
+	if mode == proto.ModeBackup && incremental && job.Retention > 0 && failed == 0 && len(job.Paths) > 0 {
 		a.pruneVersions(ctx, job, lg)
 	}
 	var parts []string
@@ -450,8 +450,8 @@ func splitLines(data []byte, atEOF bool) (advance int, token []byte, err error) 
 const (
 	flushInterval = time.Second
 	flushLines    = 200
-	maxBuffered   = 20000  // lines held while the dashboard is unreachable
-	maxRunLines   = 500000 // matches the server's per-run cap
+	maxBuffered   = 20000 // lines held while the dashboard is unreachable
+	maxRunLines   = 20000 // per run; a chatty failure must not flood the dashboard
 )
 
 // runLogger batches log lines and posts them to the dashboard about once a
@@ -462,6 +462,9 @@ type runLogger struct {
 	runID  string
 	redact []string
 	stats  runStats
+
+	lastLine, lastStream string
+	repeats              int
 
 	mu      sync.Mutex
 	seq     int64
@@ -499,6 +502,13 @@ func (l *runLogger) add(stream, line string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Collapse identical consecutive lines (a retry loop, a repeated warning).
+	if line == l.lastLine && stream == l.lastStream {
+		l.repeats++
+		return
+	}
+	l.emitRepeatsLocked()
+	l.lastLine, l.lastStream = line, stream
 	if l.seq >= maxRunLines {
 		if !l.dropped {
 			l.dropped = true
@@ -562,8 +572,22 @@ func (l *runLogger) flush(ctx context.Context, attempts int) {
 	}
 }
 
+// emitRepeatsLocked records how often the previous line repeated. l.mu held.
+func (l *runLogger) emitRepeatsLocked() {
+	if l.repeats == 0 || l.seq >= maxRunLines {
+		l.repeats = 0
+		return
+	}
+	l.seq++
+	l.buf = append(l.buf, proto.LogLine{Seq: l.seq, TS: time.Now().UnixMilli(), Stream: "agent", Line: fmt.Sprintf("(previous line repeated %d more times)", l.repeats)})
+	l.repeats = 0
+}
+
 // close stops the background flusher and does a final, retrying flush.
 func (l *runLogger) close(ctx context.Context) {
+	l.mu.Lock()
+	l.emitRepeatsLocked()
+	l.mu.Unlock()
 	close(l.stop)
 	<-l.done
 	l.flush(ctx, 5)
