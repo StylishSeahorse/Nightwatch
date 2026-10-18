@@ -172,6 +172,7 @@ func TestSplitLinesHandlesCarriageReturns(t *testing.T) {
 type fakeDashboard struct {
 	mu    sync.Mutex
 	lines []proto.LogLine
+	posts int
 	fails int // first N requests answered with 503
 }
 
@@ -183,6 +184,7 @@ func (f *fakeDashboard) handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"down"}`, http.StatusServiceUnavailable)
 		return
 	}
+	f.posts++
 	var b proto.LogBatch
 	_ = json.NewDecoder(r.Body).Decode(&b)
 	f.lines = append(f.lines, b.Lines...)

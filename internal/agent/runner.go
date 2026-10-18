@@ -111,6 +111,9 @@ func rcloneArgs(runMode string, isDir bool, src, dst, backupDir string) []string
 		"--stats", "10s", "--stats-one-line",
 		"--checkers", "8",
 		"--retries", "3", "--low-level-retries", "10",
+		// Symlinks are not followed (that could escape the selected folder);
+		// skip them silently instead of logging a notice for every one.
+		"--skip-links",
 	}
 	if runMode == proto.ModeVerify {
 		// --one-way: every source file must exist, with matching size and
@@ -464,6 +467,7 @@ type runLogger struct {
 	stats  runStats
 
 	lastLine, lastStream string
+	lastPost             time.Time // only touched by loop()
 	repeats              int
 
 	mu      sync.Mutex
@@ -487,7 +491,7 @@ func newRunLogger(api *apiClient, runID string, secrets ...string) *runLogger {
 		kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 }
 
-func (l *runLogger) start() { go l.loop() }
+func (l *runLogger) start() { l.lastPost = time.Now(); go l.loop() }
 
 func (l *runLogger) agent(format string, a ...any) { l.add("agent", fmt.Sprintf(format, a...)) }
 
@@ -527,6 +531,11 @@ func (l *runLogger) add(stream, line string) {
 	}
 }
 
+// heartbeatEvery is how often a quiet run still reports in. The dashboard
+// fails runs it has not heard from in 10 minutes, so a long silent transfer
+// (or one past the log limit) must keep saying it is alive.
+var heartbeatEvery = time.Minute
+
 func (l *runLogger) loop() {
 	defer close(l.done)
 	t := time.NewTicker(flushInterval)
@@ -538,13 +547,22 @@ func (l *runLogger) loop() {
 		case <-l.stop:
 			return
 		}
-		l.flush(context.Background(), 1)
+		if l.flush(context.Background(), 1) {
+			l.lastPost = time.Now()
+		} else if time.Since(l.lastPost) >= heartbeatEvery {
+			rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if l.api.PostLogs(rctx, l.runID, nil) == nil { // empty batch = heartbeat
+				l.lastPost = time.Now()
+			}
+			cancel()
+		}
 	}
 }
 
 // flush posts everything buffered. On failure the lines go back to the front of
 // the buffer (bounded by maxBuffered) and are retried on the next tick.
-func (l *runLogger) flush(ctx context.Context, attempts int) {
+// flush posts buffered lines; it reports whether anything was delivered.
+func (l *runLogger) flush(ctx context.Context, attempts int) (sent bool) {
 	for {
 		l.mu.Lock()
 		n := len(l.buf)
@@ -555,7 +573,7 @@ func (l *runLogger) flush(ctx context.Context, attempts int) {
 		l.buf = l.buf[n:]
 		l.mu.Unlock()
 		if len(batch) == 0 {
-			return
+			return sent
 		}
 		rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		err := withRetry(rctx, attempts, func() error { return l.api.PostLogs(rctx, l.runID, batch) })
@@ -567,8 +585,9 @@ func (l *runLogger) flush(ctx context.Context, attempts int) {
 				l.buf = l.buf[len(l.buf)-maxBuffered:]
 			}
 			l.mu.Unlock()
-			return
+			return sent
 		}
+		sent = true
 	}
 }
 

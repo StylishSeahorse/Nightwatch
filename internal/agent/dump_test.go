@@ -121,3 +121,21 @@ func TestRunLoggerCollapsesRepeatsAndCaps(t *testing.T) {
 		t.Errorf("logged %d lines, cap is %d", n, maxRunLines)
 	}
 }
+
+// A run that goes quiet (a long transfer, or past the log limit) must keep
+// reporting in, or the dashboard marks it "lost contact with agent".
+func TestRunLoggerHeartbeat(t *testing.T) {
+	old := heartbeatEvery
+	heartbeatEvery = 300 * time.Millisecond
+	defer func() { heartbeatEvery = old }()
+	f := &fakeDashboard{}
+	lg := newTestLogger(t, f)
+	lg.start()
+	time.Sleep(3500 * time.Millisecond) // flush ticks every second
+	lg.close(context.Background())
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.posts < 2 || len(f.lines) != 0 {
+		t.Errorf("quiet run sent %d heartbeats (%d lines), want >= 2", f.posts, len(f.lines))
+	}
+}

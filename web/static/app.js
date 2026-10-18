@@ -378,6 +378,22 @@ async function viewAgent(agentId) {
 
     const save = guard(async (e) => {
       e.preventDefault();
+      // Backing up /var, /var/lib or /var/lib/docker would include Docker's own
+      // storage: image layers, live container file systems and logs. Offer to skip it.
+      const internals = [];
+      for (const p of sel.keys()) {
+        const m = p.match(/^(.*)\/var(\/lib(\/docker)?)?$/) || (p === '/' ? ['', ''] : null);
+        if (!m) continue;
+        for (const d of ['overlay2', 'containers', 'image', 'buildkit', 'tmp']) {
+          const full = `${m[1]}/var/lib/docker/${d}`;
+          if (!excludes.includes(full) && !internals.includes(full)) internals.push(full);
+        }
+      }
+      if (internals.length && confirm('This job includes Docker\u2019s internal storage (image layers, running containers\u2019 file systems and logs). ' +
+        'It can be rebuilt from your images, is huge, and changes constantly.\n\nOK = skip it (recommended; your volumes in /var/lib/docker/volumes are still backed up)\nCancel = back it up anyway')) {
+        excludes.push(...internals);
+        exEd.refresh([...sel.keys()]);
+      }
       const body = {
         agent_id: agentId, credential_id: credSel.value, name: name.value, dest_prefix: prefix.value, enabled: enabled.checked,
         backup_type: backupType, retention_days: parseInt(retention.value || '0', 10),
