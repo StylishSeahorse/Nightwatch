@@ -106,6 +106,8 @@ func (a *Agent) startRun(jobID, trigger string) {
 
 // Run blocks until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	ctx, restart := context.WithCancel(ctx)
+	defer restart()
 	a.baseCtx = ctx
 	a.started = time.Now()
 	log.Printf("agent %s starting: %s, browse roots %v", Version, a.rclone, a.scanner.Roots())
@@ -114,6 +116,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	go a.configLoop(ctx)
+	if a.cfg.AutoUpdate {
+		go a.updateLoop(ctx, restart)
+	}
 
 	backoff := time.Second
 	for ctx.Err() == nil {

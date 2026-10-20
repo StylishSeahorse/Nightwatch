@@ -195,7 +195,12 @@ agent_config_rev(agent_id, rev)                                          -- chan
 `DATA_DIR` (`/data`), `COOKIE_SECURE`, `AGENT_DIST_DIR` (`/dist`, agent binaries for the installer), `BOOTSTRAP_AGENT_NAME` / `BOOTSTRAP_AGENT_KEY` (optional pre-enrolment).
 
 **Agent** (env): `AGENT_SERVER_URL`, `AGENT_API_KEY` or `AGENT_API_KEY_FILE`, `AGENT_BROWSE_ROOTS` (`/host,/data`),
-`AGENT_MAX_CONCURRENT` (1), `AGENT_CA_FILE` (private CA), `AGENT_HOSTNAME`, `AGENT_RCLONE_PATH`.
+`AGENT_MAX_CONCURRENT` (1), `AGENT_CA_FILE` (private CA), `AGENT_HOSTNAME`, `AGENT_RCLONE_PATH`,
+`AGENT_AUTO_UPDATE` (`true`; `false` in the agent image).
+
+**Agent updates.** Installed agents check the dashboard every 15 minutes. When the dashboard serves a different
+agent build (after you redeploy it), each agent waits until no backup is running, downloads it, verifies its
+checksum and that it starts, replaces itself and restarts through systemd. Redeploying the dashboard is enough.
 
 **Endpoints.** Wasabi's endpoint is derived from the region (`s3.<region>.wasabisys.com`). A credential may override
 it with any S3-compatible endpoint (e.g. MinIO); non-`wasabisys.com` endpoints automatically use rclone's generic

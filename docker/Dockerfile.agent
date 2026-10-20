@@ -31,7 +31,9 @@ COPY --from=build /out/agent /usr/local/bin/agent
 # Fail the build if rclone is missing or cannot run on this architecture.
 RUN rclone version
 
+# AGENT_AUTO_UPDATE=false: a container updates by pulling a new image, not in place.
 ENV AGENT_RCLONE_PATH=/usr/local/bin/rclone \
+    AGENT_AUTO_UPDATE=false \
     AGENT_BROWSE_ROOTS=/host,/data
 
 # Runs as root by default so it can read any mounted host file; docker-compose.yml drops every

@@ -18,6 +18,7 @@ type Config struct {
 	MaxConcurrent int      // AGENT_MAX_CONCURRENT, default 1
 	CAFile        string   // AGENT_CA_FILE: extra CA bundle for a private-CA dashboard
 	Hostname      string   // AGENT_HOSTNAME override for what the dashboard shows
+	AutoUpdate    bool     // AGENT_AUTO_UPDATE, default true: install new builds the dashboard serves
 }
 
 func LoadConfig() (*Config, error) {
@@ -28,6 +29,7 @@ func LoadConfig() (*Config, error) {
 		DockerPath: env("AGENT_DOCKER_PATH", "docker"),
 		CAFile:     os.Getenv("AGENT_CA_FILE"),
 		Hostname:   os.Getenv("AGENT_HOSTNAME"),
+		AutoUpdate: env("AGENT_AUTO_UPDATE", "true") != "false",
 	}
 	if f := os.Getenv("AGENT_API_KEY_FILE"); f != "" && c.APIKey == "" {
 		b, err := os.ReadFile(f)
