@@ -327,6 +327,7 @@ type jobView struct {
 	Enabled       bool               `json:"enabled"`
 	BackupType    string             `json:"backup_type"`
 	RetentionDays int                `json:"retention_days"`
+	Layout        string             `json:"layout"`
 	Paths         []proto.PathConfig `json:"paths"`
 	Excludes      []string           `json:"excludes"`
 	Dumps         []dumpView         `json:"dumps"`
@@ -349,6 +350,7 @@ type jobInput struct {
 	Enabled       bool               `json:"enabled"`
 	BackupType    string             `json:"backup_type"`    // "incremental" (default) | "sync"
 	RetentionDays *int               `json:"retention_days"` // incremental: days to keep versions; 0 = forever; default 30
+	Layout        string             `json:"layout"`         // "full" (default) | "contents"
 	Paths         []proto.PathConfig `json:"paths"`
 	Excludes      []string           `json:"excludes"`
 	Dumps         []dumpInput        `json:"dumps"`
@@ -383,6 +385,19 @@ func (in *jobInput) validate() error {
 	case proto.BackupIncremental, proto.BackupSync:
 	default:
 		return errors.New("backup type must be incremental or sync")
+	}
+	switch in.Layout {
+	case "":
+		in.Layout = proto.LayoutFull
+	case proto.LayoutFull:
+	case proto.LayoutContents:
+		// Each path is mirrored onto the same prefix, so a second path would
+		// delete the first one's files.
+		if len(in.Paths) != 1 {
+			return errors.New(`"contents only" layout needs exactly one selected path`)
+		}
+	default:
+		return errors.New("layout must be full or contents")
 	}
 	if in.RetentionDays == nil {
 		d := 30
@@ -462,7 +477,7 @@ func (s *Server) loadJob(id string) (*jobView, error) {
 	return &jobs[0], nil
 }
 
-const jobSelect = `SELECT j.id, j.agent_id, a.name, j.credential_id, j.name, j.dest_prefix, j.enabled, j.backup_type, j.retention_days
+const jobSelect = `SELECT j.id, j.agent_id, a.name, j.credential_id, j.name, j.dest_prefix, j.enabled, j.backup_type, j.retention_days, j.layout
 	FROM backup_jobs j JOIN agents a ON a.id = j.agent_id`
 
 func (s *Server) scanJobs(rows *sql.Rows) ([]jobView, error) {
@@ -471,7 +486,7 @@ func (s *Server) scanJobs(rows *sql.Rows) ([]jobView, error) {
 	for rows.Next() {
 		var j jobView
 		var en int
-		if err := rows.Scan(&j.ID, &j.AgentID, &j.AgentName, &j.CredentialID, &j.Name, &j.DestPrefix, &en, &j.BackupType, &j.RetentionDays); err != nil {
+		if err := rows.Scan(&j.ID, &j.AgentID, &j.AgentName, &j.CredentialID, &j.Name, &j.DestPrefix, &en, &j.BackupType, &j.RetentionDays, &j.Layout); err != nil {
 			return nil, err
 		}
 		j.Enabled = en == 1
@@ -588,8 +603,8 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO backup_jobs (id, agent_id, credential_id, name, dest_prefix, enabled, backup_type, retention_days, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		id, in.AgentID, in.CredentialID, in.Name, in.DestPrefix, b2i(in.Enabled), in.BackupType, *in.RetentionDays, now(), now()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO backup_jobs (id, agent_id, credential_id, name, dest_prefix, enabled, backup_type, retention_days, layout, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		id, in.AgentID, in.CredentialID, in.Name, in.DestPrefix, b2i(in.Enabled), in.BackupType, *in.RetentionDays, in.Layout, now(), now()); err != nil {
 		if strings.Contains(err.Error(), "FOREIGN KEY") {
 			writeErr(w, 400, "unknown agent or credential")
 			return
@@ -637,8 +652,8 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	// agent_id is immutable: moving a job between machines would silently
 	// retarget paths that only make sense on the original host.
-	if _, err := tx.Exec(`UPDATE backup_jobs SET credential_id=?, name=?, dest_prefix=?, enabled=?, backup_type=?, retention_days=?, updated_at=? WHERE id=?`,
-		in.CredentialID, in.Name, in.DestPrefix, b2i(in.Enabled), in.BackupType, *in.RetentionDays, now(), id); err != nil {
+	if _, err := tx.Exec(`UPDATE backup_jobs SET credential_id=?, name=?, dest_prefix=?, enabled=?, backup_type=?, retention_days=?, layout=?, updated_at=? WHERE id=?`,
+		in.CredentialID, in.Name, in.DestPrefix, b2i(in.Enabled), in.BackupType, *in.RetentionDays, in.Layout, now(), id); err != nil {
 		if strings.Contains(err.Error(), "FOREIGN KEY") {
 			writeErr(w, 400, "unknown credential")
 			return

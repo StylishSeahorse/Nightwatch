@@ -33,20 +33,48 @@ var unsafeSeg = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 // ":s3:" is an on-the-fly rclone backend, so no rclone.conf is ever written;
 // everything else comes from environment variables (see rcloneEnv).
 func agentRoot(w proto.WasabiConfig, job proto.JobConfig, agentName string) string {
-	parts := []string{w.Bucket}
+	return prefixRoot(w, job) + "/" + agentSeg(agentName)
+}
+
+// prefixRoot is :s3:<bucket>/<job prefix>.
+func prefixRoot(w proto.WasabiConfig, job proto.JobConfig) string {
 	if job.DestPrefix != "" {
-		parts = append(parts, job.DestPrefix)
+		return ":s3:" + w.Bucket + "/" + job.DestPrefix
 	}
+	return ":s3:" + w.Bucket
+}
+
+func agentSeg(agentName string) string {
 	seg := unsafeSeg.ReplaceAllString(agentName, "_")
 	if seg == "" || seg == "." || seg == ".." { // never let the name act as a path traversal
 		seg = "_"
 	}
-	return ":s3:" + strings.Join(append(parts, seg), "/")
+	return seg
 }
 
-// remoteFor returns the destination for a source path: <agentRoot>/<absolute path>.
-func remoteFor(w proto.WasabiConfig, job proto.JobConfig, agentName, src string) string {
+// remoteFor returns the destination for a source path: <agentRoot>/<absolute
+// path>, or with the "contents" layout <prefix> itself (<prefix>/<name> for a
+// single file).
+func remoteFor(w proto.WasabiConfig, job proto.JobConfig, agentName, src string, isDir bool) string {
+	if job.Layout == proto.LayoutContents {
+		if isDir {
+			return prefixRoot(w, job)
+		}
+		return prefixRoot(w, job) + "/" + path.Base(src)
+	}
 	return agentRoot(w, job, agentName) + "/" + strings.TrimPrefix(path.Clean(src), "/")
+}
+
+// reservedFlags protects the agent's own folders (versions and database
+// dumps, under <prefix>/<agent>/) when the "contents" layout mirrors a folder
+// straight onto <prefix>: excluded paths are never deleted by sync, and rclone
+// accepts a --backup-dir inside the destination only when it is excluded.
+func reservedFlags(job proto.JobConfig, agentName string) []string {
+	if job.Layout != proto.LayoutContents {
+		return nil
+	}
+	seg := "/" + escapeGlob(agentSeg(agentName))
+	return []string{"--exclude", seg + "/.versions/**", "--exclude", seg + "/_databases/**"}
 }
 
 // versionsRoot holds an incremental job's history:
@@ -288,10 +316,13 @@ func (a *Agent) execute(ctx context.Context, ar *activeRun, job *proto.JobConfig
 			lastCode = 1
 			continue
 		}
-		dst := remoteFor(job.Wasabi, *job, a.name(), src)
+		dst := remoteFor(job.Wasabi, *job, a.name(), src, fi.IsDir())
 		backupDir := ""
 		if incremental {
-			backupDir = versionsRoot(job.Wasabi, *job, a.name()) + "/" + stamp + "/" + strings.TrimPrefix(path.Clean(src), "/")
+			backupDir = versionsRoot(job.Wasabi, *job, a.name()) + "/" + stamp
+			if job.Layout != proto.LayoutContents {
+				backupDir += "/" + strings.TrimPrefix(path.Clean(src), "/")
+			}
 		}
 		exFlags, excluded := excludeFlags(src, job.Excludes)
 		if excluded {
@@ -300,6 +331,9 @@ func (a *Agent) execute(ctx context.Context, ar *activeRun, job *proto.JobConfig
 			continue
 		}
 		args := append(rcloneArgs(mode, fi.IsDir(), src, dst, backupDir), exFlags...)
+		if fi.IsDir() {
+			args = append(args, reservedFlags(*job, a.name())...)
+		}
 		// The command line contains no secrets, so it is safe to show.
 		lg.agent("$ rclone %s", strings.Join(args, " "))
 

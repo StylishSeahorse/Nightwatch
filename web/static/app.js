@@ -222,6 +222,7 @@ async function viewAgent(agentId) {
   const sel = new Map();           // path -> mode ("copy" | "sync")
   let editing = null;              // job being edited, or null for a new one
   let exEd = null;                 // excludes editor of the open job form
+  let layoutEd = null;             // re-renders the open job form's layout example
   const checkEls = [];             // every rendered tree checkbox, for refreshing
   const explorer = h('div', { class: 'max-h-[28rem] overflow-auto font-mono text-sm' });
   const selectedBox = h('div', { class: 'space-y-1' });
@@ -256,6 +257,7 @@ async function viewAgent(agentId) {
   function renderSelected() {
     clear(selectedBox);
     if (exEd) exEd.refresh([...sel.keys()]);
+    if (layoutEd) layoutEd();
     const manual = h('input', { class: 'input font-mono', placeholder: 'or type a path, e.g. /var/lib/docker/volumes' });
     const addManual = () => {
       const v = manual.value.trim().replace(/\/+$/, '');
@@ -376,6 +378,33 @@ async function viewAgent(agentId) {
     }
     renderType();
 
+    // Destination layout, with a live example of where files land
+    let layout = job ? (job.layout || 'full') : 'full';
+    const layoutBox = h('div', { class: 'space-y-2' });
+    layoutEd = () => {
+      const paths = [...sel.keys()];
+      const src = paths[0] || '/opt/data/files';
+      const root = prefix.value.replace(/^\/+|\/+$/g, '');
+      const at = (p) => 'bucket/' + (root ? root + '/' : '') + p;
+      const seg = (agent.name || 'agent').replace(/[^A-Za-z0-9._-]+/g, '_');
+      const card = (value, title, text, example) => h('label', {
+        class: 'block cursor-pointer rounded-md border p-3 ' + (layout === value ? 'border-emerald-600 bg-emerald-950/30' : 'border-slate-800 hover:border-slate-700'),
+      },
+      h('div', { class: 'flex items-center gap-2' },
+        h('input', { type: 'radio', name: 'layout', class: 'accent-emerald-500', checked: layout === value, onchange: () => { layout = value; layoutEd(); } }),
+        h('span', { class: 'font-medium' }, title)),
+      h('p', { class: 'mt-1 text-xs text-slate-400' }, text),
+      h('p', { class: 'mt-1 break-all font-mono text-xs text-slate-500' }, example));
+      clear(layoutBox).append(h('div', { class: 'grid gap-2 sm:grid-cols-2' },
+        card('full', 'Keep full folder path', 'Recreates the whole path under the agent\u2019s name, so several folders and machines can share a prefix.',
+          `${src}/Photos \u2192 ${at(seg + src + '/Photos')}`),
+        card('contents', 'Contents only', 'Puts what is inside the selected folder straight into the bucket prefix. Needs exactly one selected path.',
+          `${src}/Photos \u2192 ${at('Photos')}`)),
+      layout === 'contents' && paths.length > 1 ? h('p', { class: 'text-xs text-amber-400' }, `Contents only works with one selected path (${paths.length} selected): each folder would overwrite the others at the same location.`) : null);
+    };
+    prefix.addEventListener('input', layoutEd);
+    layoutEd();
+
     const save = guard(async (e) => {
       e.preventDefault();
       // Backing up /var, /var/lib or /var/lib/docker would include Docker's own
@@ -396,7 +425,7 @@ async function viewAgent(agentId) {
       }
       const body = {
         agent_id: agentId, credential_id: credSel.value, name: name.value, dest_prefix: prefix.value, enabled: enabled.checked,
-        backup_type: backupType, retention_days: parseInt(retention.value || '0', 10),
+        backup_type: backupType, retention_days: parseInt(retention.value || '0', 10), layout,
         paths: [...sel.keys()].map((path) => ({ path })),
         excludes,
         dumps: dumps.map(({ has_password, ...d }) => d),
@@ -418,6 +447,7 @@ async function viewAgent(agentId) {
       h('div', {}, h('label', { class: 'label' }, 'Selected paths'), selectedBox),
       h('div', {}, h('label', { class: 'label' }, 'Exclude'), exEd.el),
       h('div', {}, h('label', { class: 'label' }, 'Databases'), dumpsBox),
+      h('div', {}, h('label', { class: 'label' }, 'Bucket layout'), layoutBox),
       h('div', {}, h('label', { class: 'label' }, 'Backup type'), typeBox),
       h('div', {}, h('label', { class: 'label' }, 'When to run'), schedBox),
       h('label', { class: 'flex items-center gap-2 text-sm' }, enabled, 'Job enabled'),
@@ -441,6 +471,7 @@ async function viewAgent(agentId) {
         h('div', { class: 'flex flex-wrap items-center gap-2' },
           h('span', { class: 'font-medium' }, j.name), j.enabled ? null : h('span', { class: 'text-xs text-slate-500' }, '(paused)'),
           h('span', { class: 'rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300' }, j.backup_type === 'sync' ? 'Mirror sync' : 'Incremental' + (j.retention_days ? ` · ${j.retention_days}d versions` : ' · versions kept forever')),
+          j.layout === 'contents' ? h('span', { class: 'rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300' }, 'Contents only') : null,
           j.last_run ? h('a', { href: '#/runs/' + j.last_run.id, title: triggerLabel(j.last_run.trigger) + ' ' + fmtTime(j.last_run.started_at) }, badge(j.last_run.status)) : h('span', { class: 'text-xs text-slate-500' }, 'never run')),
         h('p', { class: 'text-xs text-slate-400' }, `${j.paths.length} path(s)` + (j.dumps.length ? ` + ${j.dumps.length} database(s)` : '') + (j.excludes.length ? ` · ${j.excludes.length} exclude(s)` : '') + ` · ${when}`,
           j.next_run ? h('span', { class: 'text-slate-500' }, ` · next ${until(j.next_run)} (${new Date(j.next_run * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })} your time)`) : null),

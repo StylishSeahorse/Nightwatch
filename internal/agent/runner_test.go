@@ -19,16 +19,36 @@ var wasabi = proto.WasabiConfig{AccessKey: "AKIAEXAMPLE0001", SecretKey: "s3cr3t
 
 func TestRemoteFor(t *testing.T) {
 	job := proto.JobConfig{DestPrefix: "backups/prod"}
-	got := remoteFor(wasabi, job, "nas 01/../x", "/host/home/me/docs")
+	got := remoteFor(wasabi, job, "nas 01/../x", "/host/home/me/docs", true)
 	want := ":s3:my-bucket/backups/prod/nas_01_.._x/host/home/me/docs"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
-	if got := remoteFor(wasabi, proto.JobConfig{}, "a", "/data"); got != ":s3:my-bucket/a/data" {
+	if got := remoteFor(wasabi, proto.JobConfig{}, "a", "/data", true); got != ":s3:my-bucket/a/data" {
 		t.Errorf("no prefix: got %q", got)
 	}
-	if got := remoteFor(wasabi, proto.JobConfig{DestPrefix: "p"}, "..", "/data"); got != ":s3:my-bucket/p/_/data" {
+	if got := remoteFor(wasabi, proto.JobConfig{DestPrefix: "p"}, "..", "/data", true); got != ":s3:my-bucket/p/_/data" {
 		t.Errorf("agent name \"..\" must not become a traversal segment: got %q", got)
+	}
+}
+
+func TestRemoteForContentsLayout(t *testing.T) {
+	job := proto.JobConfig{DestPrefix: "nextcloud-debb", Layout: proto.LayoutContents}
+	if got := remoteFor(wasabi, job, "nc", "/opt/ncdata/data/u/files", true); got != ":s3:my-bucket/nextcloud-debb" {
+		t.Errorf("folder: got %q", got)
+	}
+	if got := remoteFor(wasabi, job, "nc", "/opt/a.txt", false); got != ":s3:my-bucket/nextcloud-debb/a.txt" {
+		t.Errorf("file: got %q", got)
+	}
+	if got := remoteFor(wasabi, proto.JobConfig{Layout: proto.LayoutContents}, "nc", "/x", true); got != ":s3:my-bucket" {
+		t.Errorf("no prefix: got %q", got)
+	}
+	want := []string{"--exclude", "/nc/.versions/**", "--exclude", "/nc/_databases/**"}
+	if got := reservedFlags(job, "nc"); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("reserved flags: got %v", got)
+	}
+	if got := reservedFlags(proto.JobConfig{}, "nc"); got != nil {
+		t.Errorf("full layout needs no reserved flags: got %v", got)
 	}
 }
 
@@ -117,7 +137,7 @@ func TestVersionsLayoutNeverOverlapsDestinations(t *testing.T) {
 		t.Fatalf("versions root = %s", root)
 	}
 	for _, src := range []string{"/home", "/data/docs", "/v"} {
-		dst := remoteFor(wasabi, job, "nas", src)
+		dst := remoteFor(wasabi, job, "nas", src, true)
 		if strings.HasPrefix(root+"/", dst+"/") || strings.HasPrefix(dst+"/", root+"/") {
 			t.Errorf("rclone refuses overlapping --backup-dir: dst %s vs %s", dst, root)
 		}

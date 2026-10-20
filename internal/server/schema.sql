@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS backup_jobs (
     -- sync:        exact mirror, deletions propagate, no history
     backup_type   TEXT    NOT NULL DEFAULT 'incremental' CHECK (backup_type IN ('incremental', 'sync')),
     retention_days INTEGER NOT NULL DEFAULT 30,             -- incremental only; 0 = keep versions forever
+    layout         TEXT    NOT NULL DEFAULT 'full' CHECK (layout IN ('full', 'contents')), -- contents: the one path's contents land at <prefix>/
     excludes      TEXT    NOT NULL DEFAULT '[]',            -- JSON array of paths/patterns to skip
     created_at    BIGINT  NOT NULL,
     updated_at    BIGINT  NOT NULL,

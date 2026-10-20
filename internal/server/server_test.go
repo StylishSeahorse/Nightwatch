@@ -722,3 +722,25 @@ func TestRunLogsTailAndReconcile(t *testing.T) {
 		}
 	}
 }
+
+func TestJobLayoutValidation(t *testing.T) {
+	base := func(layout string, paths ...string) *jobInput {
+		in := &jobInput{Name: "j", CredentialID: "c", Layout: layout}
+		for _, p := range paths {
+			in.Paths = append(in.Paths, proto.PathConfig{Path: p})
+		}
+		return in
+	}
+	if in := base("", "/a"); in.validate() != nil || in.Layout != proto.LayoutFull {
+		t.Errorf("default layout: %q", in.Layout)
+	}
+	if err := base(proto.LayoutContents, "/a").validate(); err != nil {
+		t.Errorf("contents with one path: %v", err)
+	}
+	if err := base(proto.LayoutContents, "/a", "/b").validate(); err == nil {
+		t.Error("contents with two paths must be refused")
+	}
+	if err := base("flat", "/a").validate(); err == nil {
+		t.Error("unknown layout must be refused")
+	}
+}

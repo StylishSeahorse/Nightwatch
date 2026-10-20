@@ -143,6 +143,7 @@ type JobConfig struct {
 	DestPrefix string         `json:"dest_prefix"`
 	BackupType string         `json:"backup_type"`    // BackupIncremental | BackupSync
 	Retention  int            `json:"retention_days"` // incremental: days to keep old versions, 0 = forever
+	Layout     string         `json:"layout"`         // LayoutFull (default) | LayoutContents
 	Paths      []PathConfig   `json:"paths"`
 	Excludes   []string       `json:"excludes"` // absolute paths (and everything inside) or name patterns like *.log
 	Dumps      []DumpConfig   `json:"dumps"`    // databases dumped before the files are copied
@@ -186,6 +187,16 @@ const (
 	// BackupSync makes the destination an exact mirror: new files are added,
 	// deleted files are deleted. No history.
 	BackupSync = "sync"
+)
+
+// Destination layouts (per job).
+const (
+	// LayoutFull keeps the source's absolute path under <prefix>/<agent>/,
+	// e.g. /opt/data/files -> <prefix>/<agent>/opt/data/files/...
+	LayoutFull = "full"
+	// LayoutContents puts the contents of the job's single selected folder
+	// directly at <prefix>/, e.g. /opt/data/files/Photos -> <prefix>/Photos.
+	LayoutContents = "contents"
 )
 
 // PathConfig is one selected source on the agent. Mode is legacy and ignored:
